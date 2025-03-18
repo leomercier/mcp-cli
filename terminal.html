@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>VM Terminal</title>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <link
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        background-color: #1e1e1e;
+      }
+      #terminal-container {
+        flex: 1;
+        padding: 10px;
+        height: calc(100vh - 20px);
+      }
+      #terminal-container .terminal {
+        height: 100%;
+      }
+      .header {
+        background-color: #282828;
+        color: #f0f0f0;
+        padding: 5px 10px;
+        font-family: sans-serif;
+        font-size: 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .header button {
+        background-color: #3a3a3a;
+        color: #f0f0f0;
+        border: none;
+        padding: 5px 10px;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      .header button:hover {
+        background-color: #4a4a4a;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="header">
+      <div>VM Terminal</div>
+      <button id="clear-btn">Clear</button>
+    </div>
+    <div id="terminal-container"></div>
+
+    <script type="module">
+      const term = new Terminal({
+        cursorBlink: true,
+        theme: {
+          background: "#1e1e1e",
+          foreground: "#f0f0f0",
+          cursor: "#f0f0f0",
+          selectionBackground: "#565656"
+        },
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        fontSize: 14,
+        lineHeight: 1.2,
+        scrollback: 5000,
+        cursorStyle: "block"
+      });
+
+      // Add addons
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      term.loadAddon(new WebLinksAddon());
+
+      term.open(document.getElementById("terminal-container"));
+      fitAddon.fit();
+      term.focus();
+
+      // Handle window resize
+      window.addEventListener("resize", () => {
+        fitAddon.fit();
+      });
+
+      // Clear button functionality
+      document.getElementById("clear-btn").addEventListener("click", () => {
+        term.clear();
+      });
+
+      let ws;
+      let commandBuffer = "";
+      let commandHistory = [];
+      let historyPosition = -1;
+
+      function connectWebSocket() {
+        ws = new WebSocket("ws://" + window.location.host);
+
+        ws.onopen = () => {
+          term.writeln("\r\nConnected to VM terminal");
+          term.write("\r\n$ ");
+        };
+
+        ws.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          if (data.type === "output") {
+            term.write(data.content);
+            if (!data.content.endsWith("\n")) {
+              term.write("\r\n");
+            }
+            term.write("$ ");
+          }
+        };
+
+        ws.onclose = () => {
+          term.writeln("\r\nConnection lost. Reconnecting...");
+          setTimeout(connectWebSocket, 2000);
+        };
+
+        ws.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          term.writeln("\r\nConnection error. Please try again.");
+        };
+      }
+
+      function clearCurrentLine() {
+        const currentLine = commandBuffer;
+        for (let i = 0; i < currentLine.length; i++) {
+          term.write("\b \b");
+        }
+        return currentLine;
+      }
+
+      term.onKey(({ key, domEvent }) => {
+        const printable =
+          !domEvent.altKey && !domEvent.ctrlKey && !domEvent.metaKey;
+
+        if (domEvent.keyCode === 13) {
+          // Enter key
+          term.write("\r\n");
+
+          if (commandBuffer.trim() !== "") {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "command",
+                  command: commandBuffer
+                })
+              );
+
+              // Add to history if not duplicate
+              if (
+                commandHistory.length === 0 ||
+                commandHistory[commandHistory.length - 1] !== commandBuffer
+              ) {
+                commandHistory.push(commandBuffer);
+              }
+              historyPosition = -1;
+            } else {
+              term.writeln("Not connected to the server.");
+              term.write("$ ");
+            }
+          } else {
+            term.write("$ ");
+          }
+
+          commandBuffer = "";
+        } else if (domEvent.keyCode === 8) {
+          // Backspace
+          if (commandBuffer.length > 0) {
+            commandBuffer = commandBuffer.slice(0, -1);
+            term.write("\b \b");
+          }
+        } else if (domEvent.keyCode === 38) {
+          // Up arrow - History previous
+          if (commandHistory.length > 0) {
+            if (historyPosition === -1) {
+              historyPosition = commandHistory.length - 1;
+            } else if (historyPosition > 0) {
+              historyPosition--;
+            }
+
+            clearCurrentLine();
+            commandBuffer = commandHistory[historyPosition];
+            term.write(commandBuffer);
+          }
+        } else if (domEvent.keyCode === 40) {
+          // Down arrow - History next
+          if (historyPosition !== -1) {
+            if (historyPosition < commandHistory.length - 1) {
+              historyPosition++;
+              clearCurrentLine();
+              commandBuffer = commandHistory[historyPosition];
+              term.write(commandBuffer);
+            } else {
+              historyPosition = -1;
+              clearCurrentLine();
+              commandBuffer = "";
+            }
+          }
+        } else if (domEvent.ctrlKey && key.toLowerCase() === "c") {
+          // Ctrl+C
+          term.write("^C\r\n$ ");
+          commandBuffer = "";
+        } else if (domEvent.ctrlKey && key.toLowerCase() === "l") {
+          // Ctrl+L (clear)
+          term.clear();
+          term.write("$ " + commandBuffer);
+        } else if (printable) {
+          commandBuffer += key;
+          term.write(key);
+        }
+      });
+
+      window.addEventListener("load", connectWebSocket);
+    </script>
+  </body>
+</html>
